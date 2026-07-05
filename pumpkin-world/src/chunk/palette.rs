@@ -776,6 +776,50 @@ pub struct NetworkSerialization<V> {
     pub packed_data: Box<[i64]>,
 }
 
+impl<V> NetworkSerialization<V>
+where
+    V: Copy + Into<u64> + TryFrom<u64>,
+    <V as TryFrom<u64>>::Error: core::fmt::Debug,
+{
+    /// Rewrites every registry id in the palette via `remap`, handling all three
+    /// palette encodings (Single, Indirect, and the bit-packed Direct data).
+    ///
+    /// Used to translate ids from the server's current version to an older client
+    /// version. `bits_per_entry` is unchanged, which is safe because remapping only
+    /// substitutes ids (it never widens them past the section's existing width).
+    pub fn remap_ids(&mut self, remap: impl Fn(V) -> V) {
+        match &mut self.palette {
+            NetworkPalette::Single(registry_id) => {
+                *registry_id = remap(*registry_id);
+            }
+            NetworkPalette::Indirect(palette) => {
+                for registry_id in palette.iter_mut() {
+                    *registry_id = remap(*registry_id);
+                }
+            }
+            NetworkPalette::Direct => {
+                let bits_per_entry = usize::from(self.bits_per_entry);
+                let values_per_i64 = 64 / bits_per_entry;
+                let id_mask = (1u64 << bits_per_entry) - 1;
+
+                for packed_word in &mut self.packed_data {
+                    let mut remapped_word = 0u64;
+                    let packed_word_u64 = *packed_word as u64;
+                    for index in 0..values_per_i64 {
+                        let shift = index * bits_per_entry;
+                        // The masked value fits in `bits_per_entry` bits, which the
+                        // Direct encoding guarantees is representable by `V`.
+                        let registry_id = V::try_from((packed_word_u64 >> shift) & id_mask)
+                            .expect("packed id exceeds palette value width");
+                        remapped_word |= remap(registry_id).into() << shift;
+                    }
+                    *packed_word = remapped_word as i64;
+                }
+            }
+        }
+    }
+}
+
 pub struct BeNetworkSerialization<V> {
     pub bits_per_entry: u8,
     pub palette: NetworkPalette<V>,
